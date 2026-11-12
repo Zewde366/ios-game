@@ -1,60 +1,61 @@
-name: Build macOS Application
+name: Build iOS Game
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Install the Apple certificate and provisioning profile
-      env:
-        BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
-        P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
-        BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.BUILD_PROVISION_PROFILE_BASE64 }}
-        KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-      run: |
-        # إنشاء متغيرات محلية مؤقتة
-        CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
-        PP_PATH=$RUNNER_TEMP/build_pp.mobileprovision
-        KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+      - name: Check Xcode project
+        run: |
+          if [ ! -d "Unity-iPhone.xcodeproj" ]; then
+            echo "ERROR: Unity-iPhone.xcodeproj not found"
+            exit 1
+          fi
 
-        # تحويل الشهادات المشفرة من Base64 لحالتها الأصلية
-        echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o $CERTIFICATE_PATH
-        echo -n "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode -o $PP_PATH
+      - name: Build iOS application
+        run: |
+          xcodebuild \
+            -project "$GITHUB_WORKSPACE/Unity-iPhone.xcodeproj" \
+            -scheme Unity-iPhone \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
 
-        # إنشاء Keychain مؤقت لاستضافة الشهادة بأمان
-        security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-        security default-keychain -s $KEYCHAIN_PATH
-        security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+      - name: Package unsigned IPA
+        run: |
+          APP_PATH="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/Unity-iPhone.app"
 
-        # استيراد الشهادة إلى الـ Keychain
-        security import $CERTIFICATE_PATH -k $KEYCHAIN_PATH -P "$P12_PASSWORD" -A -T /usr/bin/codesign
-        security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          if [ ! -d "$APP_PATH" ]; then
+            echo "ERROR: iOS application was not created"
+            exit 1
+          fi
 
-        # تثبيت الـ Provisioning Profile في مساره الخاص بنظام macOS
-        mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-        cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
 
-    - name: Build Xcode Project
-      run: |
-        # استبدال 'Unity-iPhone' باسم الـ Scheme الخاص بمشروعك إذا كان مختلفاً
-        xcodebuild -project Unity-iPhone.xcodeproj                    -scheme Unity-iPhone                    -configuration Release                    -archivePath $RUNNER_TEMP/Unity-iPhone.xcarchive                    archive
+          ditto "$APP_PATH" "$RUNNER_TEMP/ipa/Payload/Unity-iPhone.app"
 
-    - name: Export IPA / APP
-      run: |
-        # تصدير اللعبة بصيغتها النهائية
-        xcodebuild -exportArchive                    -archivePath $RUNNER_TEMP/Unity-iPhone.xcarchive                    -exportPath $RUNNER_TEMP/build_output                    -exportOptionsPlist ExportOptions.plist
+          cd "$RUNNER_TEMP/ipa"
 
-    - name: Upload Build Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: macOS-Build
-        path: ${{ runner.temp }}/build_output/
+          zip -r "$RUNNER_TEMP/UnityGame-unsigned.ipa" Payload
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Unity-iOS-unsigned-IPA
+          path: ${{ runner.temp }}/UnityGame-unsigned.ipa
+          if-no-files-found: error
